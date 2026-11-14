@@ -41,6 +41,7 @@ struct goodix_qsee_profile
   bool     finish_big_endian;
 
   int      enroll_stages;
+  size_t   exit_len;     /* EXIT on close; 0: not sent */
 };
 
 #define GOODIX_QSEE_PROFILE_GFENU 1u

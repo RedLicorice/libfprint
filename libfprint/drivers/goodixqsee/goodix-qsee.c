@@ -10,6 +10,7 @@
 
 #define CMD_DETECT_SENSOR 1000u
 #define CMD_INIT 1001u
+#define CMD_EXIT 1002u
 #define CMD_INIT_FINISHED 1005u
 #define CMD_PRE_ENROLL 1006u
 #define CMD_ENROLL 1007u
@@ -387,6 +388,16 @@ worker_thread (GTask *task, gpointer object, gpointer task_data,
       g_task_return_boolean (task, TRUE);
       return;
     case WORK_CLOSE:
+      /* The Android HAL (gf_hal_common_close) sends EXIT with a zeroed header-only payload before it lets the
+       * TA go.  qsee-app-loader keeps the TA loaded across fprintd sessions, so without EXIT every open ran
+       * INIT again on the same TA and its heap filled up until an image capture killed it. */
+      if (self->p->exit_len)
+        {
+          g_autofree guint8 *payload = g_malloc0 (self->p->exit_len);
+          g_autoptr(GError) exit_error = NULL;
+          if (!invoke_success (self, CMD_EXIT, payload, self->p->exit_len, &exit_error))
+            fp_warn ("Goodix EXIT failed: %s", exit_error->message);
+        }
       goodix_qsee_qsee_close (&self->qsee);
       goodix_qsee_sensor_close (&self->sensor);
       g_task_return_boolean (task, TRUE);

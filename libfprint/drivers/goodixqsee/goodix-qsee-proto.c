@@ -49,6 +49,7 @@ const struct goodix_qsee_profile goodix_qsee_profile_milan = {
   .finish_group = 108, .finish_finger = 112, .finish_big_endian = false,
   /* goodixfp V00.04.05.01 asks for 26 samples: remaining reads 25 after the first */
   .enroll_stages = 26,
+  .exit_len = 96,
 };
 
 const struct goodix_qsee_profile *
