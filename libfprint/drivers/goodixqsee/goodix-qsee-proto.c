@@ -47,7 +47,8 @@ const struct goodix_qsee_profile goodix_qsee_profile_milan = {
   .irq_clear8 = 0x4fd4c, .irq_clear64 = 0x4fd69, .irq_drain_on_arm2 = true,
   .finish_len = 120, .finish_operation = 100, .finish_mask = 104,
   .finish_group = 108, .finish_finger = 112, .finish_big_endian = false,
-  .enroll_stages = 20,
+  /* goodixfp V00.04.05.01 asks for 26 samples: remaining reads 25 after the first */
+  .enroll_stages = 26,
 };
 
 const struct goodix_qsee_profile *

@@ -243,7 +243,10 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
   const struct goodix_qsee_profile *p = self->p;
   g_autofree guint8 *irq = g_malloc0 (p->irq_len);
   struct interactive_result *result = NULL;
+  /* Idle timeout: it restarts on every touch, so a long enroll never runs out mid-way */
+  const gint64 idle = (enrolling ? 60 : 30) * G_TIME_SPAN_SECOND;
   gint64 deadline = g_get_monotonic_time () + (enrolling ? 120 : 30) * G_TIME_SPAN_SECOND;
+  gint last_completed = -1;
   gboolean armed = FALSE;
   guint32 status = 0;
 
@@ -296,6 +299,8 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
                   event.group_id, event.finger_id, event.samples_remaining,
                   event.more_pending);
           if (!event.mask && !event.more_pending) break;
+          if (event.mask)
+            deadline = MAX (deadline, g_get_monotonic_time () + idle);
           if (event.mask & IRQ_FINGER_DOWN)
             queue_progress (self, FP_FINGER_STATUS_PRESENT, -1, NULL);
           if (event.mask & IRQ_FINGER_UP)
@@ -306,8 +311,13 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
               gint completed = CLAMP (p->enroll_stages -
                                       (gint) event.samples_remaining,
                                       0, p->enroll_stages);
-              queue_progress (self, FP_FINGER_STATUS_PRESENT, completed,
-                              retry_for_status (event.status));
+              GError *retry = retry_for_status (event.status);
+              /* fprintd turns every report into "stage passed": report a stage
+               * only when the TA took a sample, otherwise only the retry */
+              if (retry || completed != last_completed)
+                queue_progress (self, FP_FINGER_STATUS_PRESENT,
+                                retry ? -1 : completed, retry);
+              if (!retry) last_completed = completed;
               if (!event.samples_remaining && event.finger_id)
                 {
                   guint8 save[GOODIX_QSEE_SMALL_MAX];
