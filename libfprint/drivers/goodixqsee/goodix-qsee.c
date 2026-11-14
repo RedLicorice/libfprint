@@ -565,7 +565,24 @@ static void goodix_open (FpDevice *d) { start_worker (FPI_DEVICE_GOODIXQSEE (d),
 static void goodix_close (FpDevice *d) { start_worker (FPI_DEVICE_GOODIXQSEE (d), WORK_CLOSE, 0, 0, close_done); }
 static void goodix_list (FpDevice *d) { start_worker (FPI_DEVICE_GOODIXQSEE (d), WORK_LIST, GOODIX_QSEE_GROUP_DEFAULT, 0, list_done); }
 static void goodix_enroll (FpDevice *d) { start_worker (FPI_DEVICE_GOODIXQSEE (d), WORK_ENROLL, 0, 0, enroll_done); }
-static void goodix_identify (FpDevice *d) { start_worker (FPI_DEVICE_GOODIXQSEE (d), WORK_IDENTIFY, 0, 0, identify_done); }
+static void
+goodix_identify (FpDevice *d)
+{
+  GPtrArray *gallery = NULL;
+
+  /* Nothing to match against: answer "no match" without arming the sensor.
+   * The TA does not report a finger for authentication while it holds no
+   * template, so arming would only run into the timeout.  fprintd's
+   * identify-before-enroll on an empty device lands here. */
+  fpi_device_get_identify_data (d, &gallery);
+  if (!gallery || gallery->len == 0)
+    {
+      fpi_device_identify_report (d, NULL, NULL, NULL);
+      fpi_device_identify_complete (d, NULL);
+      return;
+    }
+  start_worker (FPI_DEVICE_GOODIXQSEE (d), WORK_IDENTIFY, 0, 0, identify_done);
+}
 static void goodix_clear (FpDevice *d) { start_worker (FPI_DEVICE_GOODIXQSEE (d), WORK_CLEAR, 0, 0, clear_done); }
 
 static void
@@ -646,4 +663,9 @@ fpi_device_goodixqsee_class_init (FpiDeviceGoodixQseeClass *klass)
   device_class->identify = goodix_identify;
   device_class->cancel = goodix_cancel;
   fpi_device_class_auto_initialize_features (device_class);
+  /* The TA refuses a second enrollment of a known finger itself.  Declaring it
+   * also stops fprintd's identify-before-enroll, which never completes while
+   * the TA holds no template: it does not arm finger detection for
+   * authentication with an empty gallery. */
+  device_class->features |= FP_DEVICE_FEATURE_DUPLICATES_CHECK;
 }
