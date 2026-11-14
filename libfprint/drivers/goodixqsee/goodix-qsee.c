@@ -283,6 +283,7 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
       wait = goodix_qsee_sensor_wait_irq (&self->sensor, 250);
       if (wait < 0) { g_propagate_error (error, io_error ("waiting for Goodix IRQ")); goto out; }
       if (!wait) continue;
+      if (wait > 1) fp_dbg ("collapsed %d queued Goodix IRQ events", wait);
       for (drain = 0; drain < IRQ_MAX_DRAIN; drain++)
         {
           struct goodix_qsee_irq_result event;

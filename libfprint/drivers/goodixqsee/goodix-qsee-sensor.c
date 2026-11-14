@@ -26,8 +26,12 @@ event_open (void)
   struct { struct nlmsghdr header; char body[16]; } message = {0};
   int fd = socket (AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, GF_NETLINK_PROTOCOL);
 
+  int receive_buffer = 256 * 1024;
+
   if (fd < 0 || bind (fd, (struct sockaddr *) &address, sizeof (address)))
     goto fail;
+  /* Best effort: a larger queue only reduces dropped-event noise. */
+  setsockopt (fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof (receive_buffer));
   message.header.nlmsg_len = NLMSG_LENGTH (sizeof (message.body));
   message.header.nlmsg_pid = getpid ();
   memcpy (message.body, "hello", 6);
@@ -91,9 +95,24 @@ goodix_qsee_sensor_wait_irq (struct goodix_qsee_sensor *sensor, int timeout_ms)
     return result;
   if (!(descriptor.revents & POLLIN))
     { errno = EIO; return -1; }
-  if (recv (sensor->event_fd, buffer, sizeof (buffer), 0) < 0)
-    return -1;
-  return 1;
+  /* Collapse every queued event into one wake-up. The driver sends one
+   * message per rising edge and a finger on the sensor can raise hundreds
+   * of edges while a single TA IRQ command runs; that command reports the
+   * whole pending sensor state anyway. ENOBUFS means the kernel dropped
+   * events because the queue overflowed: the socket stays usable and the
+   * drop itself proves that an IRQ fired. */
+  result = 0;
+  for (;;)
+    {
+      if (recv (sensor->event_fd, buffer, sizeof (buffer), MSG_DONTWAIT) >= 0 ||
+          errno == ENOBUFS)
+        { result++; continue; }
+      if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return result;
+      return -1;
+    }
 }
 
 void
