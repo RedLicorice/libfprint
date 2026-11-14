@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "goodix-qsee-transport.h"
+#include "goodix-qsee-proto.h"
 
 #include <errno.h>
 #include <fcntl.h>

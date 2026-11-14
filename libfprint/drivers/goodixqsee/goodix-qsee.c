@@ -28,7 +28,6 @@
 #define IRQ_IMAGE (1u << 7)
 #define IRQ_FRAME_DONE (1u << 10)
 #define IRQ_MAX_DRAIN 12
-#define ENROLL_STAGES_PROFILE_V1 25
 
 enum worker_operation { WORK_OPEN, WORK_CLOSE, WORK_LIST, WORK_DELETE,
                         WORK_ENROLL, WORK_IDENTIFY, WORK_CLEAR };
@@ -63,7 +62,10 @@ G_DEFINE_TYPE (FpiDeviceGoodixQsee, fpi_device_goodixqsee, FP_TYPE_DEVICE)
 static const FpIdEntry id_table[] = {
   { .udev_types = FPI_DEVICE_UDEV_SUBTYPE_MISC,
     .misc_name = "goodix_fp", .misc_compatible = "goodix,gf3626",
-    .driver_data = GOODIX_QSEE_PROFILE_V1 },
+    .driver_data = GOODIX_QSEE_PROFILE_GFENU },
+  { .udev_types = FPI_DEVICE_UDEV_SUBTYPE_MISC,
+    .misc_name = "goodix_fp", .misc_compatible = "goodix,gf316m",
+    .driver_data = GOODIX_QSEE_PROFILE_MILAN },
   { .udev_types = 0 }
 };
 
@@ -136,14 +138,15 @@ read_ta_name (FpDevice *device, GError **error)
 static gboolean
 bring_up (FpiDeviceGoodixQsee *self, GError **error)
 {
-  static const struct { guint32 command; gsize size; } sequence[] = {
-    { CMD_DETECT_SENSOR, 520 }, { CMD_INIT, 348 },
-    { CMD_INIT_FINISHED, 104 }, { CMD_GET_DEV_INFO, 5500 },
+  const struct goodix_qsee_profile *p = self->p;
+  const struct { guint32 command; gsize size; } sequence[] = {
+    { CMD_DETECT_SENSOR, 520 }, { CMD_INIT, p->init_len },
+    { CMD_INIT_FINISHED, p->init_finished_len }, { CMD_GET_DEV_INFO, 5500 },
   };
   g_autofree guint8 *payload = g_malloc0 (5500);
-  guint i;
+  guint i, n = p->get_dev_info ? G_N_ELEMENTS (sequence) : G_N_ELEMENTS (sequence) - 1;
 
-  for (i = 0; i < G_N_ELEMENTS (sequence); i++)
+  for (i = 0; i < n; i++)
     {
       memset (payload, 0, sequence[i].size);
       if (!invoke_success (self, sequence[i].command, payload,
@@ -156,9 +159,9 @@ bring_up (FpiDeviceGoodixQsee *self, GError **error)
 static gboolean
 set_group (FpiDeviceGoodixQsee *self, guint32 group, GError **error)
 {
-  guint8 payload[104] = {0};
-  memcpy (payload + 100, &group, sizeof (group));
-  return invoke_success (self, CMD_SET_ACTIVE_GROUP, payload, sizeof (payload), error);
+  guint8 payload[GOODIX_QSEE_SMALL_MAX] = {0};
+  memcpy (payload + self->p->set_group, &group, sizeof (group));
+  return invoke_success (self, CMD_SET_ACTIVE_GROUP, payload, self->p->set_group_len, error);
 }
 
 static GError *
@@ -219,29 +222,26 @@ queue_progress (FpiDeviceGoodixQsee *self, FpFingerStatusFlags finger_status,
 static void
 cancel_armed (FpiDeviceGoodixQsee *self)
 {
-  guint8 payload[104] = {0};
+  guint8 payload[GOODIX_QSEE_SMALL_MAX] = {0};
   guint32 ignored;
-  goodix_qsee_qsee_invoke (&self->qsee, CMD_CANCEL, payload, sizeof (payload), &ignored);
+  goodix_qsee_qsee_invoke (&self->qsee, CMD_CANCEL, payload, self->p->cancel_len, &ignored);
 }
 
 static gboolean
 finish_authentication (FpiDeviceGoodixQsee *self, const guint8 *context,
                        GError **error)
 {
-  guint8 payload[124] = {0};
-  guint32 value;
-  memcpy (&value, context + 100, 4); value = GUINT32_TO_BE (value); memcpy (payload + 104, &value, 4);
-  memcpy (&value, context + 104, 4); value = GUINT32_TO_BE (value); memcpy (payload + 108, &value, 4);
-  memcpy (payload + 112, context + 0x4fce4, 4);
-  memcpy (payload + 116, context + 0x4fce8, 4);
-  return invoke_success (self, CMD_AUTHENTICATE_FINISH, payload, sizeof (payload), error);
+  guint8 payload[GOODIX_QSEE_SMALL_MAX];
+  goodix_qsee_build_finish (self->p, payload, sizeof (payload), context);
+  return invoke_success (self, CMD_AUTHENTICATE_FINISH, payload, self->p->finish_len, error);
 }
 
 static struct interactive_result *
 capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
                    GCancellable *cancellable, GError **error)
 {
-  g_autofree guint8 *irq = g_malloc0 (GOODIX_QSEE_IRQ_SIZE);
+  const struct goodix_qsee_profile *p = self->p;
+  g_autofree guint8 *irq = g_malloc0 (p->irq_len);
   struct interactive_result *result = NULL;
   gint64 deadline = g_get_monotonic_time () + (enrolling ? 120 : 30) * G_TIME_SPAN_SECOND;
   gboolean armed = FALSE;
@@ -250,24 +250,31 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
   if (!set_group (self, GOODIX_QSEE_GROUP_DEFAULT, error)) return NULL;
   if (enrolling)
     {
-      guint8 pre[112] = {0}, enroll[180], hat[GOODIX_QSEE_HAT_SIZE];
+      guint8 pre[GOODIX_QSEE_SMALL_MAX] = {0}, enroll[GOODIX_QSEE_SMALL_MAX];
+      guint8 hat[GOODIX_QSEE_HAT_SIZE];
       guint64 challenge;
-      if (!invoke_success (self, CMD_PRE_ENROLL, pre, sizeof (pre), error)) return NULL;
-      memcpy (&challenge, pre + 104, sizeof (challenge));
-      if (!challenge || !self->token_provider (challenge, hat, error, self->token_provider_data) ||
-          !goodix_qsee_build_enroll (enroll, sizeof (enroll), GOODIX_QSEE_GROUP_DEFAULT, hat) ||
-          !invoke_success (self, CMD_ENROLL, enroll, sizeof (enroll), error)) return NULL;
+      if (!invoke_success (self, CMD_PRE_ENROLL, pre, p->pre_enroll_len, error)) return NULL;
+      memcpy (&challenge, pre + p->pre_enroll_challenge, sizeof (challenge));
+      fp_dbg ("PRE_ENROLL challenge 0x%016" G_GINT64_MODIFIER "x", challenge);
+      if (!challenge)
+        { g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "PRE_ENROLL returned no challenge"); return NULL; }
+      if (!self->token_provider (challenge, hat, error, self->token_provider_data) ||
+          !goodix_qsee_build_enroll (p, enroll, sizeof (enroll), GOODIX_QSEE_GROUP_DEFAULT, hat) ||
+          !invoke_success (self, CMD_ENROLL, enroll, p->enroll_len, error)) return NULL;
     }
   else
     {
-      guint8 auth[112] = {0};
-      memcpy (auth + 100, &(guint32){GOODIX_QSEE_GROUP_DEFAULT}, 4);
-      if (!invoke_success (self, CMD_AUTHENTICATE, auth, sizeof (auth), error)) return NULL;
+      guint8 auth[GOODIX_QSEE_SMALL_MAX] = {0};
+      memcpy (auth + p->auth_group, &(guint32){GOODIX_QSEE_GROUP_DEFAULT}, 4);
+      if (p->auth_screen)   /* screen state as the HAL reports it; -1 = unknown */
+        memcpy (auth + p->auth_screen, &(guint32){0xffffffffu}, 4);
+      if (!invoke_success (self, CMD_AUTHENTICATE, auth, p->auth_len, error)) return NULL;
     }
   armed = TRUE;
   if (goodix_qsee_sensor_enable_irq (&self->sensor))
     { g_propagate_error (error, io_error ("enabling Goodix IRQ")); goto out; }
-  goodix_qsee_prepare_irq (irq);
+  goodix_qsee_prepare_irq (p, irq);
   while (g_get_monotonic_time () < deadline)
     {
       int wait, drain;
@@ -279,14 +286,15 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
       for (drain = 0; drain < IRQ_MAX_DRAIN; drain++)
         {
           struct goodix_qsee_irq_result event;
-          goodix_qsee_prepare_irq (irq);
-          if (!invoke (self, 1016, irq, GOODIX_QSEE_IRQ_SIZE, &status, error)) goto out;
-          goodix_qsee_parse_irq (irq, &event);
+          goodix_qsee_prepare_irq (p, irq);
+          if (!invoke (self, 1016, irq, p->irq_len, &status, error)) goto out;
+          goodix_qsee_parse_irq (p, irq, &event);
           event.status = status;
-          fp_dbg ("IRQ drain %d: mask=0x%08x operation=%u status=%u group=%u finger=%u remaining=%u",
+          fp_dbg ("IRQ drain %d: mask=0x%08x operation=%u status=%u group=%u finger=%u remaining=%u more=%d",
                   drain, event.mask, event.operation, event.status,
-                  event.group_id, event.finger_id, event.samples_remaining);
-          if (!event.mask) break;
+                  event.group_id, event.finger_id, event.samples_remaining,
+                  event.more_pending);
+          if (!event.mask && !event.more_pending) break;
           if (event.mask & IRQ_FINGER_DOWN)
             queue_progress (self, FP_FINGER_STATUS_PRESENT, -1, NULL);
           if (event.mask & IRQ_FINGER_UP)
@@ -294,22 +302,23 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
           if (!(event.mask & (IRQ_IMAGE | IRQ_FRAME_DONE))) continue;
           if (enrolling)
             {
-              gint completed = CLAMP (ENROLL_STAGES_PROFILE_V1 -
+              gint completed = CLAMP (p->enroll_stages -
                                       (gint) event.samples_remaining,
-                                      0, ENROLL_STAGES_PROFILE_V1);
+                                      0, p->enroll_stages);
               queue_progress (self, FP_FINGER_STATUS_PRESENT, completed,
                               retry_for_status (event.status));
               if (!event.samples_remaining && event.finger_id)
                 {
-                  guint8 save[112];
-                  goodix_qsee_build_finger_command (save, sizeof (save), event.group_id, event.finger_id);
-                  if (!invoke_success (self, CMD_SAVE, save, sizeof (save), error)) goto out;
+                  guint8 save[GOODIX_QSEE_SMALL_MAX];
+                  goodix_qsee_build_finger_command (p, save, sizeof (save), p->save_len,
+                                                    event.group_id, event.finger_id);
+                  if (!invoke_success (self, CMD_SAVE, save, p->save_len, error)) goto out;
                   {
                     g_autoptr(GError) refresh_error = NULL;
-                    guint8 auth_id[112] = {0};
+                    guint8 auth_id[GOODIX_QSEE_SMALL_MAX] = {0};
                     if (!set_group (self, event.group_id, &refresh_error) ||
                         !invoke_success (self, CMD_GET_AUTH_ID, auth_id,
-                                         sizeof (auth_id), &refresh_error))
+                                         p->get_auth_id_len, &refresh_error))
                       fp_warn ("Enrollment saved but auth-id refresh failed: %s",
                                refresh_error->message);
                   }
@@ -351,6 +360,9 @@ worker_thread (GTask *task, gpointer object, gpointer task_data,
     {
     case WORK_OPEN:
       self->profile = fpi_device_get_driver_data (FP_DEVICE (self));
+      self->p = goodix_qsee_profile_get (self->profile);
+      if (!self->p)
+        { error = fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED); break; }
       if (!self->ta_name)
         self->ta_name = read_ta_name (FP_DEVICE (self), &error);
       if (!self->ta_name) break;
@@ -370,23 +382,24 @@ worker_thread (GTask *task, gpointer object, gpointer task_data,
       return;
     case WORK_LIST:
       {
-        g_autofree guint8 *payload = g_malloc0 (GOODIX_QSEE_ENUMERATE_SIZE);
+        g_autofree guint8 *payload = g_malloc0 (self->p->enumerate_len);
         struct list_result *result = g_new0 (struct list_result, 1);
         if (!set_group (self, work->group_id, &error) ||
             !invoke_success (self, CMD_ENUMERATE, payload,
-                             GOODIX_QSEE_ENUMERATE_SIZE, &error))
+                             self->p->enumerate_len, &error))
           { g_free (result); break; }
-        result->count = goodix_qsee_parse_enumerate (payload, result->fingers,
+        result->count = goodix_qsee_parse_enumerate (self->p, payload, result->fingers,
                                                      &result->count_mismatch);
         g_task_return_pointer (task, result, g_free);
         return;
       }
     case WORK_DELETE:
       {
-        guint8 payload[112];
-        goodix_qsee_build_finger_command (payload, sizeof (payload),
+        guint8 payload[GOODIX_QSEE_SMALL_MAX];
+        goodix_qsee_build_finger_command (self->p, payload, sizeof (payload),
+                                          self->p->remove_len,
                                           work->group_id, work->finger_id);
-        if (!invoke_success (self, CMD_REMOVE, payload, sizeof (payload), &error))
+        if (!invoke_success (self, CMD_REMOVE, payload, self->p->remove_len, &error))
           break;
         g_task_return_boolean (task, TRUE);
         return;
@@ -402,22 +415,23 @@ worker_thread (GTask *task, gpointer object, gpointer task_data,
       }
     case WORK_CLEAR:
       {
-        guint8 enumerate[GOODIX_QSEE_ENUMERATE_SIZE] = {0};
+        guint8 enumerate[GOODIX_QSEE_SMALL_MAX] = {0};
         struct goodix_qsee_finger fingers[GOODIX_QSEE_ENUMERATE_MAX];
         size_t count, i;
         if (!set_group (self, GOODIX_QSEE_GROUP_DEFAULT, &error) ||
-            !invoke_success (self, CMD_ENUMERATE, enumerate, sizeof (enumerate), &error))
+            !invoke_success (self, CMD_ENUMERATE, enumerate, self->p->enumerate_len, &error))
           break;
-        count = goodix_qsee_parse_enumerate (enumerate, fingers, NULL);
+        count = goodix_qsee_parse_enumerate (self->p, enumerate, fingers, NULL);
         for (i = 0; i < count; i++)
           {
-            guint8 remove[112];
+            guint8 remove[GOODIX_QSEE_SMALL_MAX];
             if (g_cancellable_is_cancelled (cancellable))
               { g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_CANCELLED,
                                      "Clear storage cancelled"); break; }
-            goodix_qsee_build_finger_command (remove, sizeof (remove),
-                                               fingers[i].group_id, fingers[i].finger_id);
-            if (!invoke_success (self, CMD_REMOVE, remove, sizeof (remove), &error)) break;
+            goodix_qsee_build_finger_command (self->p, remove, sizeof (remove),
+                                              self->p->remove_len,
+                                              fingers[i].group_id, fingers[i].finger_id);
+            if (!invoke_success (self, CMD_REMOVE, remove, self->p->remove_len, &error)) break;
           }
         if (error) break;
         g_task_return_boolean (task, TRUE);
@@ -581,6 +595,12 @@ goodix_probe (FpDevice *device)
   g_autofree gchar *device_id = NULL;
 
   self->profile = fpi_device_get_driver_data (device);
+  self->p = goodix_qsee_profile_get (self->profile);
+  if (!self->p)
+    { fpi_device_probe_complete (device, NULL, NULL,
+                                 fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
+      return; }
+  fpi_device_set_nr_enroll_stages (device, self->p->enroll_stages);
   self->ta_name = read_ta_name (device, &error);
   if (self->ta_name)
     device_id = g_strdup_printf ("profile-%u:%s", self->profile, self->ta_name);
@@ -614,7 +634,7 @@ fpi_device_goodixqsee_class_init (FpiDeviceGoodixQseeClass *klass)
   device_class->type = FP_DEVICE_TYPE_UDEV;
   device_class->id_table = id_table;
   device_class->scan_type = FP_SCAN_TYPE_PRESS;
-  device_class->nr_enroll_stages = ENROLL_STAGES_PROFILE_V1;
+  device_class->nr_enroll_stages = 25;
   device_class->temp_hot_seconds = -1;
   device_class->open = goodix_open;
   device_class->probe = goodix_probe;

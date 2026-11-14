@@ -5,11 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define GOODIX_QSEE_PROFILE_V1 1u
+#include "goodix-qsee-profile.h"
+
 #define GOODIX_QSEE_GROUP_DEFAULT 0u
-#define GOODIX_QSEE_ENUMERATE_SIZE 184u
 #define GOODIX_QSEE_ENUMERATE_MAX 10u
-#define GOODIX_QSEE_IRQ_SIZE 327624u
 #define GOODIX_QSEE_HAT_SIZE 69u
 #define GOODIX_QSEE_RESPONSE_SIZE 8u
 
@@ -46,15 +45,22 @@ struct goodix_qsee_irq_result {
   uint32_t group_id;
   uint32_t finger_id;
   uint32_t samples_remaining;
+  bool more_pending;
 };
 
-size_t goodix_qsee_parse_enumerate (const uint8_t payload[GOODIX_QSEE_ENUMERATE_SIZE],
-                              struct goodix_qsee_finger out[GOODIX_QSEE_ENUMERATE_MAX],
-                              bool *count_mismatch);
-bool goodix_qsee_prepare_irq (uint8_t payload[GOODIX_QSEE_IRQ_SIZE]);
-bool goodix_qsee_parse_irq (const uint8_t payload[GOODIX_QSEE_IRQ_SIZE],
-                      struct goodix_qsee_irq_result *out);
-bool goodix_qsee_build_enroll (uint8_t *payload, size_t size, uint32_t group_id,
-                         const uint8_t hat[GOODIX_QSEE_HAT_SIZE]);
-bool goodix_qsee_build_finger_command (uint8_t *payload, size_t size,
-                                 uint32_t group_id, uint32_t finger_id);
+/* Every buffer below is at least the profile's length for that command. */
+size_t goodix_qsee_parse_enumerate (const struct goodix_qsee_profile *p,
+                                    const uint8_t *payload,
+                                    struct goodix_qsee_finger out[GOODIX_QSEE_ENUMERATE_MAX],
+                                    bool *count_mismatch);
+bool goodix_qsee_prepare_irq (const struct goodix_qsee_profile *p, uint8_t *payload);
+bool goodix_qsee_parse_irq (const struct goodix_qsee_profile *p, const uint8_t *payload,
+                            struct goodix_qsee_irq_result *out);
+bool goodix_qsee_build_enroll (const struct goodix_qsee_profile *p, uint8_t *payload,
+                               size_t size, uint32_t group_id,
+                               const uint8_t hat[GOODIX_QSEE_HAT_SIZE]);
+bool goodix_qsee_build_finger_command (const struct goodix_qsee_profile *p, uint8_t *payload,
+                                       size_t size, size_t len,
+                                       uint32_t group_id, uint32_t finger_id);
+bool goodix_qsee_build_finish (const struct goodix_qsee_profile *p, uint8_t *payload,
+                               size_t size, const uint8_t *irq);

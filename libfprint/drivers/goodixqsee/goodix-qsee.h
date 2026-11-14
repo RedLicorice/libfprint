@@ -2,6 +2,7 @@
 #pragma once
 
 #include "fpi-device.h"
+#include "goodix-qsee-profile.h"
 #include "goodix-qsee-sensor.h"
 #include "goodix-qsee-transport.h"
 #include "goodix-qsee-token.h"
@@ -16,6 +17,7 @@ struct _FpiDeviceGoodixQsee
   struct goodix_qsee_qsee qsee;
   gchar *ta_name;
   guint profile;
+  const struct goodix_qsee_profile *p;
   GoodixQseeTokenProvider token_provider;
   gpointer token_provider_data;
 };
