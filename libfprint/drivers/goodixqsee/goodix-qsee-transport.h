@@ -8,6 +8,10 @@ struct goodix_qsee_qsee {
   int fd;
   uint32_t session;
   uint32_t token;
+  /* The load session on the privileged device, when this open loaded the TA:
+   * it holds the TA, and closing it unloads it (fd -1: the TA was resident). */
+  int load_fd;
+  uint32_t load_session;
 };
 
 int goodix_qsee_qsee_open (struct goodix_qsee_qsee *qsee, const char *ta_name);

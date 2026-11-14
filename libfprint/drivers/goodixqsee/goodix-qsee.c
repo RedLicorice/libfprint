@@ -388,9 +388,9 @@ worker_thread (GTask *task, gpointer object, gpointer task_data,
       g_task_return_boolean (task, TRUE);
       return;
     case WORK_CLOSE:
-      /* The Android HAL (gf_hal_common_close) sends EXIT with a zeroed header-only payload before it lets the
-       * TA go.  qsee-app-loader keeps the TA loaded across fprintd sessions, so without EXIT every open ran
-       * INIT again on the same TA and its heap filled up until an image capture killed it. */
+      /* The Android HAL (gf_hal_common_close) sends EXIT with a zeroed header-only payload before it shuts
+       * the TA down.  The close below unloads the TA when this open loaded it; a TA kept resident by
+       * something else needs the EXIT even more, since INIT on top of INIT fills its heap. */
       if (self->p->exit_len)
         {
           g_autofree guint8 *payload = g_malloc0 (self->p->exit_len);
@@ -650,7 +650,7 @@ static void
 fpi_device_goodixqsee_init (FpiDeviceGoodixQsee *self)
 {
   self->sensor.device_fd = self->sensor.event_fd = -1;
-  self->qsee.fd = -1;
+  self->qsee.fd = self->qsee.load_fd = -1;
   self->token_provider = goodix_qsee_challenge_token;
 }
 

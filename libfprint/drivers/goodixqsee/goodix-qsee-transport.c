@@ -49,7 +49,7 @@ shm_alloc (int fd, size_t size, struct qsee_shm *shm)
 }
 
 static int
-open_client (void)
+open_device (bool privileged)
 {
   struct tee_ioctl_version_data version;
   char path[32];
@@ -57,7 +57,7 @@ open_client (void)
 
   for (i = 0; i < 8; i++)
     {
-      snprintf (path, sizeof (path), "/dev/tee%d", i);
+      snprintf (path, sizeof (path), privileged ? "/dev/teepriv%d" : "/dev/tee%d", i);
       fd = open (path, O_RDWR | O_CLOEXEC);
       if (fd < 0)
         continue;
@@ -70,8 +70,10 @@ open_client (void)
   return -1;
 }
 
-int
-goodix_qsee_qsee_open (struct goodix_qsee_qsee *qsee, const char *ta_name)
+/* A session on the TA named ta_name: on the client device it attaches to the TA (ENOENT when it is not
+ * resident), on the privileged device it loads it. */
+static int
+open_named_session (int fd, const char *ta_name, uint32_t *session)
 {
   struct {
     struct tee_ioctl_open_session_arg arg;
@@ -81,12 +83,8 @@ goodix_qsee_qsee_open (struct goodix_qsee_qsee *qsee, const char *ta_name)
   struct qsee_shm name = {0};
   int saved;
 
-  if (!qsee || !ta_name || !*ta_name || strlen (ta_name) >= 64)
-    { errno = EINVAL; return -1; }
-  memset (qsee, 0, sizeof (*qsee));
-  qsee->fd = open_client ();
-  if (qsee->fd < 0 || shm_alloc (qsee->fd, 64, &name))
-    goto fail;
+  if (shm_alloc (fd, 64, &name))
+    return -1;
   memcpy (name.data, ta_name, strlen (ta_name) + 1);
   request.arg.num_params = 1;
   request.params[0].attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
@@ -94,16 +92,70 @@ goodix_qsee_qsee_open (struct goodix_qsee_qsee *qsee, const char *ta_name)
   request.params[0].c = name.id;
   data.buf_ptr = (uintptr_t) &request;
   data.buf_len = sizeof (request);
-  if (ioctl (qsee->fd, TEE_IOC_OPEN_SESSION, &data) || request.arg.ret)
-    { if (!errno) errno = EIO; goto fail; }
-  qsee->session = request.arg.session;
+  errno = 0;
+  if (ioctl (fd, TEE_IOC_OPEN_SESSION, &data) || request.arg.ret)
+    {
+      saved = errno ? errno : EIO;
+      shm_release (&name);
+      errno = saved;
+      return -1;
+    }
   shm_release (&name);
+  *session = request.arg.session;
   return 0;
+}
+
+static void
+close_session (int fd, uint32_t session)
+{
+  struct tee_ioctl_close_session_arg arg = { .session = session };
+  ioctl (fd, TEE_IOC_CLOSE_SESSION, &arg);
+}
+
+/*
+ * The Android HAL starts the TA on open and shuts it down on close (gf_hal_common_close: EXIT, then
+ * QSEECom_shutdown_app), so every open finds a fresh TA.  The TA counts on that: kept resident, each
+ * INIT/EXIT cycle leaves part of its heap behind, and after about ten opens INIT loads only some of the
+ * stored templates and then fails with GF_ERROR_OUT_OF_MEMORY.  So when the TA is not resident this open
+ * loads it through the privileged device and holds the load session until close, which unloads it (the
+ * kernel unloads a TA with its last session).  A TA something else keeps resident is only attached to.
+ */
+int
+goodix_qsee_qsee_open (struct goodix_qsee_qsee *qsee, const char *ta_name)
+{
+  int saved;
+
+  if (!qsee || !ta_name || !*ta_name || strlen (ta_name) >= 64)
+    { errno = EINVAL; return -1; }
+  memset (qsee, 0, sizeof (*qsee));
+  qsee->load_fd = -1;
+  qsee->fd = open_device (false);
+  if (qsee->fd < 0)
+    goto fail;
+  if (!open_named_session (qsee->fd, ta_name, &qsee->session))
+    return 0;
+  if (errno != ENOENT)
+    goto fail;
+
+  qsee->load_fd = open_device (true);
+  if (qsee->load_fd < 0)
+    goto fail;
+  if (open_named_session (qsee->load_fd, ta_name, &qsee->load_session))
+    {
+      /* another process may have loaded it meanwhile */
+      saved = errno;
+      close (qsee->load_fd);
+      qsee->load_fd = -1;
+      if (!open_named_session (qsee->fd, ta_name, &qsee->session))
+        return 0;
+      errno = saved;
+      goto fail;
+    }
+  if (!open_named_session (qsee->fd, ta_name, &qsee->session))
+    return 0;
 fail:
   saved = errno;
-  shm_release (&name);
-  if (qsee->fd >= 0) close (qsee->fd);
-  qsee->fd = -1;
+  goodix_qsee_qsee_close (qsee);
   errno = saved;
   return -1;
 }
@@ -111,16 +163,22 @@ fail:
 void
 goodix_qsee_qsee_close (struct goodix_qsee_qsee *qsee)
 {
-  if (!qsee || qsee->fd < 0)
+  if (!qsee)
     return;
-  if (qsee->session)
+  if (qsee->fd >= 0)
     {
-      struct tee_ioctl_close_session_arg arg = { .session = qsee->session };
-      ioctl (qsee->fd, TEE_IOC_CLOSE_SESSION, &arg);
+      if (qsee->session)
+        close_session (qsee->fd, qsee->session);
+      close (qsee->fd);
     }
-  close (qsee->fd);
-  qsee->fd = -1;
-  qsee->session = 0;
+  if (qsee->load_fd >= 0)
+    {
+      if (qsee->load_session)
+        close_session (qsee->load_fd, qsee->load_session);
+      close (qsee->load_fd);
+    }
+  qsee->fd = qsee->load_fd = -1;
+  qsee->session = qsee->load_session = 0;
 }
 
 static void
