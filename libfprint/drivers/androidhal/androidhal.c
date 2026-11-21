@@ -22,6 +22,13 @@
  *   FP_ANDROIDHAL_SOCKET          the bridge's socket
  *   FP_ANDROIDHAL_ENROLL_STAGES   the samples one enrolment takes
  *   FP_ANDROIDHAL_ENROLL_TIMEOUT  seconds the HAL waits for each sample
+ *   FP_ANDROIDHAL_ACQUIRED_FINGER_DOWN, FP_ANDROIDHAL_ACQUIRED_FINGER_UP
+ *                                 the HAL's vendor acquired codes for a finger put on and lifted (optional)
+ *
+ * While an enrolment or an identify waits for a finger the device reports
+ * FP_FINGER_STATUS_NEEDED (fprintd's finger-needed property), and PRESENT
+ * while a finger is down: what a shell needs to show an in-display sensor
+ * (Minerva's Phosh draws its UDFPS circle from these).
  */
 #define FP_COMPONENT "androidhal"
 
@@ -190,7 +197,8 @@ static gboolean
 progress_in_main (gpointer user_data)
 {
   struct progress_event *event = user_data;
-  fpi_device_report_finger_status (FP_DEVICE (event->self), event->finger_status);
+  if (event->finger_status != (FpFingerStatusFlags) -1)
+    fpi_device_report_finger_status (FP_DEVICE (event->self), event->finger_status);
   if (event->completed >= 0 || event->retry)
     fpi_device_enroll_progress (FP_DEVICE (event->self), MAX (event->completed, 0),
                                 NULL, g_steal_pointer (&event->retry));
@@ -209,6 +217,13 @@ queue_progress (FpiDeviceAndroidHal *self, FpFingerStatusFlags finger_status,
   event->completed = completed;
   event->retry = retry;
   g_main_context_invoke (NULL, progress_in_main, event);
+}
+
+/* the finger status while an operation waits for a finger: needed, and present while a finger is down */
+static FpFingerStatusFlags
+waiting (gboolean present)
+{
+  return FP_FINGER_STATUS_NEEDED | (present ? FP_FINGER_STATUS_PRESENT : 0);
 }
 
 /* a request whose only answer is the reply */
@@ -320,8 +335,10 @@ interactive (FpiDeviceAndroidHal *self, gboolean enrolling, GCancellable *cancel
   FpDevice *device = FP_DEVICE (self);
   gint stages = fp_device_get_nr_enroll_stages (device), last_completed = -1;
   struct finger *result = NULL;
+  gboolean present = FALSE;
   struct message m;
 
+  queue_progress (self, waiting (FALSE), -1, NULL);
   if (enrolling ? !send_request (self, error, "enroll %u", self->enroll_timeout)
                 : !send_request (self, error, "identify"))
     return NULL;
@@ -347,13 +364,16 @@ interactive (FpiDeviceAndroidHal *self, gboolean enrolling, GCancellable *cancel
       if (m.type == MSG_ACQUIRED)
         {
           GError *retry = retry_for (m.d[0]);
+          if (self->acquired_down && m.d[0] == self->acquired_down)
+            present = TRUE;
+          else if (self->acquired_up && m.d[0] == self->acquired_up)
+            present = FALSE;
           if (enrolling && retry)
-            queue_progress (self, FP_FINGER_STATUS_PRESENT, -1, retry);
+            queue_progress (self, waiting (present), -1, retry);
           else
             {
               g_clear_error (&retry);
-              if (m.d[0] == ACQUIRED_GOOD)
-                queue_progress (self, FP_FINGER_STATUS_PRESENT, -1, NULL);
+              queue_progress (self, waiting (present), -1, NULL);
             }
         }
       else if (m.type == MSG_TEMPLATE_ENROLLING && enrolling)
@@ -363,7 +383,7 @@ interactive (FpiDeviceAndroidHal *self, gboolean enrolling, GCancellable *cancel
             stages = (gint) m.d[2] + 1;
           gint completed = CLAMP (stages - (gint) m.d[2], 0, stages);
           if (completed != last_completed)
-            queue_progress (self, FP_FINGER_STATUS_PRESENT, completed, NULL);
+            queue_progress (self, waiting (present), completed, NULL);
           last_completed = completed;
           if (m.d[2] == 0)
             {
@@ -626,6 +646,8 @@ hal_probe (FpDevice *device)
 
   self->socket_path = g_strdup (g_getenv ("FP_ANDROIDHAL_SOCKET"));
   self->enroll_timeout = env_uint ("FP_ANDROIDHAL_ENROLL_TIMEOUT", 0);
+  self->acquired_down = env_uint ("FP_ANDROIDHAL_ACQUIRED_FINGER_DOWN", 0);
+  self->acquired_up = env_uint ("FP_ANDROIDHAL_ACQUIRED_FINGER_UP", 0);
   if (!self->socket_path || !*self->socket_path || !stages)
     {
       fpi_device_probe_complete (device, NULL, NULL,
