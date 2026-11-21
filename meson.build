@@ -142,6 +142,7 @@ drivers_info = {
     'upekts': {},
     'goodixmoc': {},
     'goodixqsee': { 'helper': ['udev'] },
+    'androidhal': { 'helper': ['udev'] },
     'nb1010': {},
     'fpcmoc': {},
     'realtek': {},

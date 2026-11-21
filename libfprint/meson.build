@@ -134,6 +134,9 @@ driver_sources = {
         'drivers/goodixmoc/goodix.c',
         'drivers/goodixmoc/goodix_proto.c',
     ),
+    'androidhal' : files(
+        'drivers/androidhal/androidhal.c',
+    ),
     'goodixqsee' : files(
         'drivers/goodixqsee/goodix-qsee.c',
         'drivers/goodixqsee/goodix-qsee-proto.c',
